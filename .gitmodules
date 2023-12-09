@@ -1,3 +1,6 @@
 [submodule "RTC"]
 	path = RTC
 	url = https://github.com/forrestfwilliams/OPERA-RTC
+[submodule "s1-reader"]
+	path = s1-reader
+	url = https://github.com/isce-framework/s1-reader.git
