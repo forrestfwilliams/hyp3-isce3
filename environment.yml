@@ -1,0 +1,26 @@
+name: hyp3-isce3
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python>=3.9,<3.10
+  - gdal>=3.0
+  - s1reader>=0.2.2
+  - numpy>=1.20
+  - pybind11>=2.5
+  - pyre>=1.11.2
+  - scipy!=1.10.0
+  - isce3>=0.15.0
+  # Workaround for the issue with `libabseil` (09/11/2023)
+  - libabseil=20230125.3
+  - pip
+  # For packaging, and testing
+  - ruff
+  - setuptools
+  - setuptools_scm
+  - wheel
+  - pytest
+  - pytest-console-scripts
+  - pytest-cov
+  # For running
+  - hyp3lib>=2
