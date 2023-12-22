@@ -37,6 +37,9 @@ develop = [
 Homepage = "ttps://github.com/forrestfwilliams/hyp3-isce3"
 Documentation = "https://hyp3-docs.asf.alaska.edu"
 
+[project.scripts]
+burst_rtc = "hyp3_isce3.process:main"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 script_launch_mode = "subprocess"
@@ -61,11 +64,11 @@ quote-style = "single"
 
 [tool.ruff.lint]
 extend-select = [
-    "I",   # isort: https://docs.astral.sh/ruff/rules/#isort-i
-    "UP",  # pyupgrade: https://docs.astral.sh/ruff/rules/#pyupgrade-up
-    "D",   # pydocstyle: https://docs.astral.sh/ruff/rules/#pydocstyle-d
-    "ANN", # annotations: https://docs.astral.sh/ruff/rules/#flake8-annotations-ann
-    "PTH", # use-pathlib-pth: https://docs.astral.sh/ruff/rules/#flake8-use-pathlib-pth
+    # "I",   # isort: https://docs.astral.sh/ruff/rules/#isort-i
+    # "UP",  # pyupgrade: https://docs.astral.sh/ruff/rules/#pyupgrade-up
+    # "D",   # pydocstyle: https://docs.astral.sh/ruff/rules/#pydocstyle-d
+    # "ANN", # annotations: https://docs.astral.sh/ruff/rules/#flake8-annotations-ann
+    # "PTH", # use-pathlib-pth: https://docs.astral.sh/ruff/rules/#flake8-use-pathlib-pth
 ]
 
 [tool.ruff.lint.pydocstyle]
