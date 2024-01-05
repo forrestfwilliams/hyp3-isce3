@@ -11,6 +11,7 @@ import rasterio
 from dem_stitcher import stitch_dem
 from hyp3lib.get_orb import downloadSentinelOrbitFile
 from rtc import helpers
+from rtc.mosaic_geobursts import mosaic_single_output_file
 from rtc.rtc_s1_single_job import run_single_job
 from rtc.runconfig import (
     RunConfig,
@@ -96,10 +97,10 @@ def set_hyp3_defaults(cfg_dict):
     cfg_dict['runconfig']['groups']['product_group']['output_imagery_format'] = 'GTiff'
     cfg_dict['runconfig']['groups']['product_group']['processing_type'] = 'CUSTOM'
     cfg_dict['runconfig']['groups']['product_group']['product_path'] = '.'
-    cfg_dict['runconfig']['groups']['product_group']['product_id'] = 'final'
+    cfg_dict['runconfig']['groups']['product_group']['product_id'] = 'burst'
     cfg_dict['runconfig']['groups']['product_group']['scratch_path'] = 'scratch_dir'
     cfg_dict['runconfig']['groups']['product_group']['output_imagery_nbits'] = 16
-    cfg_dict['runconfig']['groups']['product_group']['save_mosaics'] = True
+    cfg_dict['runconfig']['groups']['product_group']['save_mosaics'] = False
     cfg_dict['runconfig']['groups']['product_group']['save_secondary_layers_as_hdf5'] = True
     return cfg_dict
 
@@ -184,19 +185,34 @@ def create_rtc(granule: str, pixelsize: int, radiometry: str) -> None:
     run_single_job(cfg)
 
 
+def create_file_list(polarization='VV'):
+    output_dir = Path('output_dir')
+    rtcs = sorted([str(x) for x in output_dir.glob(f'./*/burst_{polarization.upper()}.tif')])
+    auxs = sorted([str(x) for x in output_dir.glob('./*/burst.h5')])
+    # HDF5:"output_dir/t064_136231_iw2/burst.h5"://data/numberOfLooks
+    n_looks = [f'HDF5:{x}://data/numberOfLooks' for x in auxs]
+    return rtcs, n_looks
+
+
 def main():
     """process_isce3 entrypoint"""
     parser = argparse.ArgumentParser(
         prog='create_rtc',
         description=__doc__,
     )
-    parser.add_argument('granule', help='Burst Granule to create an RTC for')
+    parser.add_argument('granules', type=str.split, nargs='+')
     parser.add_argument('--pixelsize', type=float, choices=[10.0, 20.0, 30.0], default=30.0)
     parser.add_argument('--radiometry', choices=['gamma0', 'sigma0', 'uncorrected'], default='gamma0')
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
     args = parser.parse_args()
 
-    create_rtc(**args.__dict__)
+    args.granules = [item for sublist in args.granules for item in sublist]
+    for granule in args.granules:
+        create_rtc(granule, args.pixelsize, args.radiometry)
+
+    if len(args.granules) > 1:
+        rtcs, n_looks = create_file_list()
+        mosaic_single_output_file(rtcs, n_looks, 'final.tif', 'first', 'scratch_dir')
 
 
 if __name__ == '__main__':
