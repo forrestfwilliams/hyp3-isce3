@@ -1,9 +1,12 @@
 """
-ISCE3 processing
+ISCE3 burst-based RTC workflow
 """
 import argparse
+import copy
 import logging
+import shutil
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 import asf_search
@@ -22,12 +25,17 @@ from rtc.runconfig import (
 )
 from ruamel.yaml import YAML
 from s1reader.s1_reader import load_single_burst
-from shapely.geometry import shape
+from shapely import unary_union
+from shapely.geometry import Polygon, shape
 
 from hyp3_isce3 import __version__, utils
 
 
 log = logging.getLogger(__name__)
+
+
+INPUT_DIR = Path('input_dir')
+OUTPUT_DIR = Path('output_dir')
 
 
 def download_dem_for_footprint(footprint, dem_path):
@@ -38,76 +46,95 @@ def download_dem_for_footprint(footprint, dem_path):
     return dem_path
 
 
-def prep_data(granule, esa_username=None, esa_password=None, async_download=True):
+@dataclass
+class BurstInfo:
+    granule: str
+    slc_granule: str
+    data_url: Path
+    data_path: Path
+    metadata_url: Path
+    metadata_path: Path
+    footprint: Polygon
+
+
+def get_burst_info(granules, save_dir):
+    burst_infos = []
+    for granule in granules:
+        results = asf_search.search(product_list=[granule])
+        if len(results) == 0:
+            raise ValueError(f'ASF Search failed to find {granule}.')
+        if len(results) > 1:
+            raise ValueError(f'ASF Search found multiple results for {granule}.')
+        result = results[0]
+        burst_granule = result.properties['fileID']
+        slc_granule = result.umm['InputGranules'][0].split('-')[0]
+        data_url = result.properties['url']
+        data_path = save_dir / f'{burst_granule}.tiff'
+        metadata_url = result.properties['additionalUrls'][0]
+        metadata_path = save_dir / f'{burst_granule}.xml'
+        footprint = shape(result.geojson()['geometry'])
+        burst_info = BurstInfo(burst_granule, slc_granule, data_url, data_path, metadata_url, metadata_path, footprint)
+        burst_infos.append(burst_info)
+    return burst_infos
+
+
+def prep_data(burst_infos, save_dir, dem_name='dem.tiff', esa_username=None, esa_password=None, max_workers=6):
     if (esa_username is None) or (esa_password is None):
         esa_username, esa_password = utils.get_esa_credentials()
     esa_creds = (esa_username, esa_password)
 
-    input_dir = Path('input_dir')
-    input_dir.mkdir(exist_ok=True, parents=True)
-    results = asf_search.search(product_list=[granule])
-    if len(results) == 0:
-        raise ValueError(f'ASF Search failed to find {granule}.')
-    if len(results) > 1:
-        raise ValueError(f'ASF Search found multiple results for {granule}.')
-    result = results[0]
+    save_dir.mkdir(exist_ok=True, parents=True)
+    dem_path = save_dir / dem_name
 
-    data_url = result.properties['url']
-    metadata_url = result.properties['additionalUrls'][0]
-    burst_granule = result.properties['fileID']
-    slc_granule = result.umm['InputGranules'][0].split('-')[0]
-    footprint = shape(result.geojson()['geometry']).buffer(0.2)
-    dem_path = input_dir / 'dem.tiff'
+    full_footprint = unary_union([x.footprint for x in burst_infos]).buffer(0.15)
+    slc_granules = list(set([x.slc_granule for x in burst_infos]))
 
-    burst_path = input_dir / f'{burst_granule}.tiff'
-    metadata_path = input_dir / f'{burst_granule}.xml'
-    if async_download:
-        with ThreadPoolExecutor() as executor:
-            executor.submit(download_dem_for_footprint, footprint, dem_path)
-            executor.submit(downloadSentinelOrbitFile, slc_granule, str(input_dir), esa_credentials=esa_creds)
-            executor.submit(asf_search.download_url, data_url, input_dir, burst_path.name)
-            executor.submit(asf_search.download_url, metadata_url, input_dir, metadata_path.name)
-    else:
-        with asf_search.ASFSession() as sess:
-            asf_search.download_url(data_url, input_dir, burst_path.name, sess)
-            asf_search.download_url(metadata_url, input_dir, metadata_path.name, sess)
-        download_dem_for_footprint(footprint, dem_path)
-        downloadSentinelOrbitFile(slc_granule, str(input_dir), esa_credentials=esa_creds)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        executor.submit(download_dem_for_footprint, full_footprint, dem_path)
 
-    orbit_path = Path(list(input_dir.glob('*.EOF'))[0])
+        for info in burst_infos:
+            executor.submit(asf_search.download_url, info.data_url, info.data_path.parent, info.data_path.name)
+            executor.submit(
+                asf_search.download_url, info.metadata_url, info.metadata_path.parent, info.metadata_path.name
+            )
 
-    return burst_path, metadata_path, orbit_path, dem_path
+        for slc_granule in slc_granules:
+            executor.submit(downloadSentinelOrbitFile, slc_granule, str(save_dir), esa_credentials=esa_creds)
 
 
 def set_hyp3_defaults(cfg_dict):
     cfg_dict['runconfig']['name'] = 'hyp3_job'
     cfg_dict['runconfig']['groups']['input_file_group']['safe_file_path'] = 'single_burst'
     cfg_dict['runconfig']['groups']['input_file_group']['burst_id'] = None
+    cfg_dict['runconfig']['groups']['processing']['geocoding']['num_workers'] = 1
     cfg_dict['runconfig']['groups']['processing']['geocoding']['memory_mode'] = 'auto'
     cfg_dict['runconfig']['groups']['processing']['geocoding']['apply_shadow_masking'] = False
     cfg_dict['runconfig']['groups']['processing']['polarization'] = 'co-pol'
     cfg_dict['runconfig']['groups']['processing']['geo2rdr']['numiter'] = 25
     cfg_dict['runconfig']['groups']['processing']['geo2rdr']['threshold'] = 1e-08
-    cfg_dict['runconfig']['groups']['processing']['geocoding']['save_mask'] = False
     cfg_dict['runconfig']['groups']['processing']['geocoding']['save_nlooks'] = True
+    cfg_dict['runconfig']['groups']['processing']['geocoding']['save_dem'] = True
+    cfg_dict['runconfig']['groups']['processing']['geocoding']['save_mask'] = True
+    cfg_dict['runconfig']['groups']['processing']['geocoding']['save_incidence_angle'] = True
     cfg_dict['runconfig']['groups']['processing']['geocoding']['save_rtc_anf'] = True
     cfg_dict['runconfig']['groups']['processing']['rtc']['dem_upsampling'] = 1
-    cfg_dict['runconfig']['groups']['product_group']['output_dir'] = 'output_dir'
+    cfg_dict['runconfig']['groups']['product_group']['output_dir'] = str(OUTPUT_DIR)
     cfg_dict['runconfig']['groups']['product_group']['output_imagery_compression'] = 'ZSTD'
     cfg_dict['runconfig']['groups']['product_group']['output_imagery_format'] = 'GTiff'
     cfg_dict['runconfig']['groups']['product_group']['processing_type'] = 'CUSTOM'
     cfg_dict['runconfig']['groups']['product_group']['product_path'] = '.'
-    cfg_dict['runconfig']['groups']['product_group']['product_id'] = 'burst'
+    cfg_dict['runconfig']['groups']['product_group']['product_id'] = 'rtc'
     cfg_dict['runconfig']['groups']['product_group']['scratch_path'] = 'scratch_dir'
     cfg_dict['runconfig']['groups']['product_group']['output_imagery_nbits'] = 16
     cfg_dict['runconfig']['groups']['product_group']['save_mosaics'] = False
-    cfg_dict['runconfig']['groups']['product_group']['save_secondary_layers_as_hdf5'] = True
+    cfg_dict['runconfig']['groups']['product_group']['save_browse'] = False
+    cfg_dict['runconfig']['groups']['product_group']['save_secondary_layers_as_hdf5'] = False
     return cfg_dict
 
 
-def set_important_options(cfg_dict, dem_path, orbit_path, pixel_size, radiometry):
+def set_important_options(cfg_dict, dem_path, orbit_paths, pixel_size, radiometry):
     cfg_dict['runconfig']['groups']['dynamic_ancillary_file_group']['dem_file'] = dem_path
-    cfg_dict['runconfig']['groups']['input_file_group']['orbit_file_path'] = [orbit_path]
+    cfg_dict['runconfig']['groups']['input_file_group']['orbit_file_path'] = orbit_paths
 
     bursts_geogrid = cfg_dict['runconfig']['groups']['processing']['geocoding']['bursts_geogrid']
     mosaic_geogrid = cfg_dict['runconfig']['groups']['processing']['mosaicking']['mosaic_geogrid']
@@ -126,7 +153,7 @@ def set_important_options(cfg_dict, dem_path, orbit_path, pixel_size, radiometry
     return cfg_dict
 
 
-def create_config(burst_path, metadata_path, orbit_path, dem_path, pixel_size, radiometry) -> RunConfig:
+def create_configs(burst_infos, orbit_paths, dem_path, pixel_size, radiometry) -> RunConfig:
     """Initialize RunConfig class with options from given yaml file.
 
     Parameters
@@ -141,7 +168,8 @@ def create_config(burst_path, metadata_path, orbit_path, dem_path, pixel_size, r
         cfg = parser.load(f_default)
 
     cfg = set_hyp3_defaults(cfg)
-    set_important_options(cfg, str(dem_path), str(orbit_path), pixel_size, radiometry)
+    orbit_path_strs = [str(x) for x in orbit_paths]
+    set_important_options(cfg, str(dem_path), orbit_path_strs, pixel_size, radiometry)
 
     groups_cfg = cfg['runconfig']['groups']
 
@@ -156,42 +184,87 @@ def create_config(burst_path, metadata_path, orbit_path, dem_path, pixel_size, r
     # Convert runconfig dict to SimpleNamespace
     sns = wrap_namespace(groups_cfg)
 
-    # Load bursts
-    burst_obj = load_single_burst(str(burst_path), str(metadata_path), str(orbit_path))
-    bursts_new = {str(burst_obj.burst_id): {burst_obj.polarization: burst_obj}}
-    bursts = bursts_new
+    # Load burst
+    bursts = {}
+    burst_orbits = {}
+    for info in burst_infos:
+        # FIXME: this is a hack to get the orbit path
+        burst_orbit = str(orbit_paths[0])
+
+        burst_obj = load_single_burst(str(info.data_path), str(info.metadata_path), burst_orbit)
+        bursts[str(burst_obj.burst_id)] = {burst_obj.polarization: burst_obj}
+        burst_orbits[str(burst_obj.burst_id)] = burst_orbit
 
     # Load geogrids
     geogrid_all, geogrids = generate_geogrids(bursts, geocoding_dict, mosaic_dict)
 
-    # Empty reference dict for base runconfig class constructor
-    empty_ref_dict = {}
+    burst_cfgs = []
+    for burst_id in bursts:
+        sns_copy = copy.deepcopy(sns)
+        cfg_copy = copy.deepcopy(cfg)
+        burst_cfg = RunConfig(
+            cfg_copy['runconfig']['name'],
+            sns_copy,
+            {burst_id: bursts[burst_id]},
+            {},
+            None,
+            geogrid_all,
+            {burst_id: geogrids[burst_id]},
+            burst_orbits[burst_id],
+        )
+        burst_cfgs.append(burst_cfg)
 
-    configuration = RunConfig(
-        cfg['runconfig']['name'], sns, bursts, empty_ref_dict, None, geogrid_all, geogrids, orbit_path
-    )
-
-    return configuration
+    return geogrid_all, burst_cfgs
 
 
-def create_rtc(granule: str, pixelsize: int, radiometry: str) -> None:
+def create_file_list(polarization='VV'):
+    file_types = [
+        f'rtc_{polarization.upper()}.tif',
+        'rtc_number_of_looks.tif',
+        'rtc_incidence_angle.tif',
+        'rtc_mask.tif',
+        'rtc_interpolated_dem.tif',
+        'rtc_rtc_anf_gamma0_to_beta0.tif',
+    ]
+    file_groups = {}
+    for file_type in file_types:
+        files = sorted([str(x) for x in OUTPUT_DIR.glob(f'./*/{file_type}')])
+        if len(files) > 0:
+            file_groups[file_type] = files
+
+    return file_groups
+
+
+def burst_rtc(granules: str, pixelsize: int, radiometry: str) -> None:
     """Create a greeting product
 
     Args:
     """
-    burst_path, metadata_path, orbit_path, dem_path = prep_data(granule)
-    cfg = create_config(burst_path, metadata_path, orbit_path, dem_path, pixelsize, radiometry)
-    load_parameters(cfg)
-    run_single_job(cfg)
+    burst_infos = get_burst_info(granules, INPUT_DIR)
+    dem_path = INPUT_DIR / 'dem.tiff'
+    prep_data(burst_infos, INPUT_DIR, dem_path.name)
+    orbit_paths = [Path(x) for x in INPUT_DIR.glob('*.EOF')]
+    mosaic_geogrid, cfgs = create_configs(burst_infos, orbit_paths, dem_path, pixelsize, radiometry)
+    for cfg in cfgs:
+        load_parameters(cfg)
+        run_single_job(cfg)
 
+    file_groups = create_file_list()
+    if len(granules) > 1:
+        for name in file_groups:
+            mosaic_single_output_file(
+                file_groups[name],
+                file_groups['burst_number_of_looks.tif'],
+                OUTPUT_DIR / name,
+                'first',
+                'scratch_dir',
+                geogrid_in=mosaic_geogrid,
+            )
+    else:
+        for name in file_groups:
+            shutil.copy(file_groups[name][0], OUTPUT_DIR / name)
 
-def create_file_list(polarization='VV'):
-    output_dir = Path('output_dir')
-    rtcs = sorted([str(x) for x in output_dir.glob(f'./*/burst_{polarization.upper()}.tif')])
-    auxs = sorted([str(x) for x in output_dir.glob('./*/burst.h5')])
-    # HDF5:"output_dir/t064_136231_iw2/burst.h5"://data/numberOfLooks
-    n_looks = [f'HDF5:{x}://data/numberOfLooks' for x in auxs]
-    return rtcs, n_looks
+    return mosaic_geogrid
 
 
 def main():
@@ -207,12 +280,7 @@ def main():
     args = parser.parse_args()
 
     args.granules = [item for sublist in args.granules for item in sublist]
-    for granule in args.granules:
-        create_rtc(granule, args.pixelsize, args.radiometry)
-
-    if len(args.granules) > 1:
-        rtcs, n_looks = create_file_list()
-        mosaic_single_output_file(rtcs, n_looks, 'final.tif', 'first', 'scratch_dir')
+    burst_rtc(args.granules, args.pixelsize, args.radiometry)
 
 
 if __name__ == '__main__':
