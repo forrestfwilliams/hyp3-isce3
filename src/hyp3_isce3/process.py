@@ -1,5 +1,5 @@
 """
-ISCE3 burst-based RTC workflow
+ISCE3 burst-based RTC processing for single or multiple bursts.
 """
 import argparse
 import copy
@@ -7,12 +7,15 @@ import logging
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import Iterable, List, Tuple
 
 import asf_search
 import rasterio
 from dem_stitcher import stitch_dem
 from hyp3lib.get_orb import downloadSentinelOrbitFile
+from isce3.product import GeoGridParameters
 from rtc import helpers
 from rtc.mosaic_geobursts import mosaic_single_output_file
 from rtc.rtc_s1_single_job import run_single_job
@@ -35,19 +38,14 @@ log = logging.getLogger(__name__)
 
 
 INPUT_DIR = Path('input_dir')
+SCRATCH_DIR = Path('scratch_dir')
 OUTPUT_DIR = Path('output_dir')
-
-
-def download_dem_for_footprint(footprint, dem_path):
-    X, p = stitch_dem(footprint.bounds, dem_name='glo_30', dst_ellipsoidal_height=False, dst_area_or_point='Point')
-    with rasterio.open(dem_path, 'w', **p) as ds:
-        ds.write(X, 1)
-        ds.update_tags(AREA_OR_POINT='Point')
-    return dem_path
 
 
 @dataclass
 class BurstInfo:
+    """Dataclass for storing burst information."""
+
     granule: str
     slc_granule: str
     data_url: Path
@@ -57,7 +55,28 @@ class BurstInfo:
     footprint: Polygon
 
 
-def get_burst_info(granules, save_dir):
+def download_dem_for_footprint(footprint: Polygon, dem_path: Path) -> None:
+    """Download a DEM for the given footprint.
+
+    Args:
+        footprint: The footprint to download a DEM for.
+        dem_path: The path to download the DEM to.
+    """
+    X, p = stitch_dem(footprint.bounds, dem_name='glo_30', dst_ellipsoidal_height=False, dst_area_or_point='Point')
+    with rasterio.open(dem_path, 'w', **p) as ds:
+        ds.write(X, 1)
+        ds.update_tags(AREA_OR_POINT='Point')
+
+
+def get_burst_info(granules: Iterable[str], save_dir: Path) -> List[BurstInfo]:
+    """Get burst information from ASF Search.
+
+    Args:
+        granules: The burst granules to get information for.
+        save_dir: The directory to save the data to.
+    Returns:
+        A list of BurstInfo objects.
+    """
     burst_infos = []
     for granule in granules:
         results = asf_search.search(product_list=[granule])
@@ -78,7 +97,24 @@ def get_burst_info(granules, save_dir):
     return burst_infos
 
 
-def prep_data(burst_infos, save_dir, dem_name='dem.tiff', esa_username=None, esa_password=None, max_workers=6):
+def prep_data(
+    burst_infos: List[BurstInfo],
+    save_dir: Path,
+    dem_name: str = 'dem.tiff',
+    esa_username: str = None,
+    esa_password: str = None,
+    max_workers: int = 6,
+) -> None:
+    """Download data needed for RTC processing using multiple threads.
+
+    Args:
+        burst_infos: The information of the bursts to download.
+        save_dir: The directory to save the data to.
+        dem_name: The name to give the downloaded DEM.
+        esa_username: The ESA CDSE username to use for downloading orbit files.
+        esa_password: The ESA CDSE password to use for downloading orbit files.
+        max_workers: The maximum number of threads to use for downloading.
+    """
     if (esa_username is None) or (esa_password is None):
         esa_username, esa_password = utils.get_esa_credentials()
     esa_creds = (esa_username, esa_password)
@@ -102,7 +138,14 @@ def prep_data(burst_infos, save_dir, dem_name='dem.tiff', esa_username=None, esa
             executor.submit(downloadSentinelOrbitFile, slc_granule, str(save_dir), esa_credentials=esa_creds)
 
 
-def set_hyp3_defaults(cfg_dict):
+def set_hyp3_defaults(cfg_dict: dict) -> dict:
+    """Set hyp3 defaults for RTC processing.
+
+    Args:
+        cfg_dict: The config dictionary to update.
+    Returns:
+        The updated config dictionary.
+    """
     cfg_dict['runconfig']['name'] = 'hyp3_job'
     cfg_dict['runconfig']['groups']['input_file_group']['safe_file_path'] = 'single_burst'
     cfg_dict['runconfig']['groups']['input_file_group']['burst_id'] = None
@@ -124,7 +167,7 @@ def set_hyp3_defaults(cfg_dict):
     cfg_dict['runconfig']['groups']['product_group']['processing_type'] = 'CUSTOM'
     cfg_dict['runconfig']['groups']['product_group']['product_path'] = '.'
     cfg_dict['runconfig']['groups']['product_group']['product_id'] = 'rtc'
-    cfg_dict['runconfig']['groups']['product_group']['scratch_path'] = 'scratch_dir'
+    cfg_dict['runconfig']['groups']['product_group']['scratch_path'] = str(SCRATCH_DIR)
     cfg_dict['runconfig']['groups']['product_group']['output_imagery_nbits'] = 16
     cfg_dict['runconfig']['groups']['product_group']['save_mosaics'] = False
     cfg_dict['runconfig']['groups']['product_group']['save_browse'] = False
@@ -132,7 +175,20 @@ def set_hyp3_defaults(cfg_dict):
     return cfg_dict
 
 
-def set_important_options(cfg_dict, dem_path, orbit_paths, pixel_size, radiometry):
+def set_important_options(
+    cfg_dict: dict, dem_path: str, orbit_paths: Iterable[str], pixel_size: float, radiometry: str
+) -> dict:
+    """Set important options for RTC processing.
+
+    Args:
+        cfg_dict: The config dictionary to update.
+        dem_path: The path to the DEM to use.
+        orbit_paths: The paths to the orbit files to use.
+        pixel_size: The pixel size to use.
+        radiometry: The radiometry to use (gamma0, sigma0, or uncorrected).
+    Returns:
+        The updated config dictionary.
+    """
     cfg_dict['runconfig']['groups']['dynamic_ancillary_file_group']['dem_file'] = dem_path
     cfg_dict['runconfig']['groups']['input_file_group']['orbit_file_path'] = orbit_paths
 
@@ -153,15 +209,47 @@ def set_important_options(cfg_dict, dem_path, orbit_paths, pixel_size, radiometr
     return cfg_dict
 
 
-def create_configs(burst_infos, orbit_paths, dem_path, pixel_size, radiometry) -> RunConfig:
-    """Initialize RunConfig class with options from given yaml file.
+def get_valid_orbit(burst_granule: str, orbit_paths: Iterable[Path]) -> Path:
+    """Select the valid orbit file for the given burst from a list of orbit files.
 
-    Parameters
-    ----------
-    yaml_path : str
-        Path to yaml file containing the options to load
+    Args:
+        burst_granule: The burst granule to find the orbit file for.
+        orbit_paths: The paths to the orbit files to choose from.
+    Returns:
+        The path to the valid orbit file.
     """
-    # load default runconfig
+    date_format = '%Y%m%dT%H%M%S'
+    burst_time_str = burst_granule.split('_')[3]
+    burst_time = datetime.strptime(burst_time_str, date_format)
+
+    for orbit in orbit_paths:
+        orbit_name = orbit.name.split('.')[0]
+        start_time_str = orbit_name.split('_')[6][1:]
+        start_time = datetime.strptime(start_time_str, date_format)
+
+        stop_time_str = orbit_name.split('_')[7]
+        stop_time = datetime.strptime(stop_time_str, date_format)
+
+        if burst_time > start_time and burst_time < stop_time:
+            return orbit
+
+    raise ValueError(f'No valid orbit file provided for burst {burst_granule}')
+
+
+def create_configs(
+    burst_infos: Iterable[BurstInfo], orbit_paths: Iterable[Path], dem_path: Path, pixel_size: float, radiometry: str
+) -> Tuple[GeoGridParameters, List[RunConfig]]:
+    """Create RunConfig objects for each input burst.
+
+    Args:
+        burst_infos: The information of the bursts to process.
+        orbit_paths: The paths to the orbit files to use.
+        dem_path: The path to the DEM to use.
+        pixel_size: The pixel size to use.
+        radiometry: The radiometry to use (gamma0, sigma0, or uncorrected).
+    Returns:
+        The mosaic geogrid parameters for merging, and a list of RunConfig objects customized for each burst.
+    """
     parser = YAML(typ='safe')
     default_cfg_path = f'{helpers.WORKFLOW_SCRIPTS_DIR}/defaults/rtc_s1.yaml'
     with open(default_cfg_path, 'r') as f_default:
@@ -173,29 +261,23 @@ def create_configs(burst_infos, orbit_paths, dem_path, pixel_size, radiometry) -
 
     groups_cfg = cfg['runconfig']['groups']
 
-    # Read mosaic dict
     mosaic_dict = groups_cfg['processing']['mosaicking']
     check_geogrid_dict(mosaic_dict['mosaic_geogrid'])
 
-    # Read geocoding dict
     geocoding_dict = groups_cfg['processing']['geocoding']
     check_geogrid_dict(geocoding_dict['bursts_geogrid'])
 
-    # Convert runconfig dict to SimpleNamespace
     sns = wrap_namespace(groups_cfg)
 
-    # Load burst
     bursts = {}
     burst_orbits = {}
     for info in burst_infos:
-        # FIXME: this is a hack to get the orbit path
-        burst_orbit = str(orbit_paths[0])
+        burst_orbit = str(get_valid_orbit(info.granule, orbit_paths))
 
         burst_obj = load_single_burst(str(info.data_path), str(info.metadata_path), burst_orbit)
         bursts[str(burst_obj.burst_id)] = {burst_obj.polarization: burst_obj}
         burst_orbits[str(burst_obj.burst_id)] = burst_orbit
 
-    # Load geogrids
     geogrid_all, geogrids = generate_geogrids(bursts, geocoding_dict, mosaic_dict)
 
     burst_cfgs = []
@@ -217,7 +299,14 @@ def create_configs(burst_infos, orbit_paths, dem_path, pixel_size, radiometry) -
     return geogrid_all, burst_cfgs
 
 
-def create_file_list(polarization='VV'):
+def create_file_list(polarization: str = 'VV') -> dict:
+    """Create a dictionary of output file types and their paths.
+
+    Args:
+        polarization: The polarization to use.
+    Returns:
+        A dictionary of output file types and their paths.
+    """
     file_types = [
         f'rtc_{polarization.upper()}.tif',
         'rtc_number_of_looks.tif',
@@ -235,10 +324,13 @@ def create_file_list(polarization='VV'):
     return file_groups
 
 
-def burst_rtc(granules: str, pixelsize: int, radiometry: str) -> None:
-    """Create a greeting product
+def burst_rtc(granules: Iterable[str], pixelsize: float, radiometry: str) -> None:
+    """Run RTC processing on a single or multiple bursts.
 
     Args:
+        granules: The burst granules to process.
+        pixelsize: The pixel size to use.
+        radiometry: The radiometry to use (gamma0, sigma0, or uncorrected).
     """
     burst_infos = get_burst_info(granules, INPUT_DIR)
     dem_path = INPUT_DIR / 'dem.tiff'
@@ -254,21 +346,19 @@ def burst_rtc(granules: str, pixelsize: int, radiometry: str) -> None:
         for name in file_groups:
             mosaic_single_output_file(
                 file_groups[name],
-                file_groups['burst_number_of_looks.tif'],
+                file_groups['rtc_number_of_looks.tif'],
                 OUTPUT_DIR / name,
                 'first',
-                'scratch_dir',
+                SCRATCH_DIR,
                 geogrid_in=mosaic_geogrid,
             )
     else:
         for name in file_groups:
             shutil.copy(file_groups[name][0], OUTPUT_DIR / name)
 
-    return mosaic_geogrid
-
 
 def main():
-    """process_isce3 entrypoint"""
+    """Entrypoint for burst_rtc command line usage."""
     parser = argparse.ArgumentParser(
         prog='create_rtc',
         description=__doc__,
@@ -277,9 +367,10 @@ def main():
     parser.add_argument('--pixelsize', type=float, choices=[10.0, 20.0, 30.0], default=30.0)
     parser.add_argument('--radiometry', choices=['gamma0', 'sigma0', 'uncorrected'], default='gamma0')
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
-    args = parser.parse_args()
 
+    args = parser.parse_args()
     args.granules = [item for sublist in args.granules for item in sublist]
+
     burst_rtc(args.granules, args.pixelsize, args.radiometry)
 
 
