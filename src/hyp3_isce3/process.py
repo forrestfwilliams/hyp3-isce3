@@ -7,7 +7,7 @@ import logging
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable, List, Tuple
 
@@ -48,6 +48,9 @@ class BurstInfo:
 
     granule: str
     slc_granule: str
+    polarization: str
+    direction: str
+    date: datetime
     data_url: Path
     data_path: Path
     metadata_url: Path
@@ -85,14 +88,33 @@ def get_burst_info(granules: Iterable[str], save_dir: Path) -> List[BurstInfo]:
         if len(results) > 1:
             raise ValueError(f'ASF Search found multiple results for {granule}.')
         result = results[0]
+
         burst_granule = result.properties['fileID']
         slc_granule = result.umm['InputGranules'][0].split('-')[0]
+        polarization = burst_granule.split('_')[4].upper()
+        direction = result.properties['flightDirection'].upper()
+        date_format = '%Y%m%dT%H%M%S'
+        burst_time_str = burst_granule.split('_')[3]
+        burst_time = datetime.strptime(burst_time_str, date_format)
         data_url = result.properties['url']
         data_path = save_dir / f'{burst_granule}.tiff'
         metadata_url = result.properties['additionalUrls'][0]
         metadata_path = save_dir / f'{burst_granule}.xml'
         footprint = shape(result.geojson()['geometry'])
-        burst_info = BurstInfo(burst_granule, slc_granule, data_url, data_path, metadata_url, metadata_path, footprint)
+
+        burst_info = BurstInfo(
+            burst_granule,
+            slc_granule,
+            polarization,
+            direction,
+            burst_time,
+            data_url,
+            data_path,
+            metadata_url,
+            metadata_path,
+            footprint,
+        )
+
         burst_infos.append(burst_info)
     return burst_infos
 
@@ -136,6 +158,38 @@ def prep_data(
 
         for slc_granule in slc_granules:
             executor.submit(downloadSentinelOrbitFile, slc_granule, str(save_dir), esa_credentials=esa_creds)
+
+
+def check_group_validity(burst_infos: Iterable[BurstInfo]) -> None:
+    """Check that a set of burst products are valid for merging. This includes:
+    No more than 30 bursts are being processed.
+    All bursts have the same:
+        - polarization
+        - direction (ascending or descending)
+    All bursts were collected with 7 days of each other.
+    All bursts are contiguous. (every burst footprint intersects the union of all other burst footprints)
+    """
+    if len(burst_infos) > 30:
+        raise ValueError('Too many bursts to process. Maximum of 30 bursts allowed.')
+
+    polarizations = set([x.polarization for x in burst_infos])
+    if len(polarizations) > 1:
+        raise ValueError('All bursts must have the same polarization.')
+
+    directions = set([x.direction for x in burst_infos])
+    if len(directions) > 1:
+        raise ValueError('All bursts must have the same orbit direction (ascending or descending.')
+
+    dates = [x.date for x in burst_infos]
+    if max(dates) - min(dates) > timedelta(days=7):
+        raise ValueError('All bursts must have been collected within 7 days of each other.')
+
+    footprints = [x.footprint for x in burst_infos]
+    for i, footprint in enumerate(footprints):
+        other_footprints = footprints[:i] + footprints[i + 1 :]
+        union = unary_union(other_footprints)
+        if not footprint.intersects(union):
+            raise ValueError('All bursts must be contiguous.')
 
 
 def set_hyp3_defaults(cfg_dict: dict) -> dict:
@@ -333,6 +387,7 @@ def burst_rtc(granules: Iterable[str], pixelsize: float, radiometry: str) -> Non
         radiometry: The radiometry to use (gamma0, sigma0, or uncorrected).
     """
     burst_infos = get_burst_info(granules, INPUT_DIR)
+    check_group_validity(burst_infos)
     dem_path = INPUT_DIR / 'dem.tiff'
     prep_data(burst_infos, INPUT_DIR, dem_path.name)
     orbit_paths = [Path(x) for x in INPUT_DIR.glob('*.EOF')]
