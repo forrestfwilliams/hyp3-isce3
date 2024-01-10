@@ -12,10 +12,12 @@ from pathlib import Path
 from typing import Iterable, List, Tuple
 
 import asf_search
+import numpy as np
 import rasterio
 from dem_stitcher import stitch_dem
 from hyp3lib.get_orb import downloadSentinelOrbitFile
 from isce3.product import GeoGridParameters
+from osgeo import gdal
 from rtc import helpers
 from rtc.mosaic_geobursts import mosaic_single_output_file
 from rtc.rtc_s1_single_job import run_single_job
@@ -169,6 +171,9 @@ def check_group_validity(burst_infos: Iterable[BurstInfo]) -> None:
     All bursts were collected with 7 days of each other.
     All bursts are contiguous. (every burst footprint intersects the union of all other burst footprints)
     """
+    if len(burst_infos) == 1:
+        return
+
     if len(burst_infos) > 30:
         raise ValueError('Too many bursts to process. Maximum of 30 bursts allowed.')
 
@@ -378,55 +383,78 @@ def create_file_list(polarization: str = 'VV') -> dict:
     return file_groups
 
 
-def burst_rtc(granules: Iterable[str], pixelsize: float, radiometry: str) -> None:
+def change_rtc_scale(file_path: Path, scale: str) -> None:
+    """Change the scale of an input power-scaled RTC file.
+
+    Args:
+        file_path: The path to the RTC file to scale.
+        scale: The scale to use (power, amplitude, or decibel).
+    """
+    scale = scale.lower()
+    if scale == 'power':
+        return
+
+    ds = gdal.Open(str(file_path), gdal.GA_Update)
+    band = ds.GetRasterBand(1)
+
+    if scale == 'amplitude':
+        band.WriteArray(np.sqrt(band.ReadAsArray()))
+    elif scale == 'decibel':
+        band.WriteArray(10 * np.log10(band.ReadAsArray()))
+    else:
+        raise ValueError(f'Invalid scale {scale}. Must be power, amplitude, or decibel.')
+
+
+def burst_rtc(granules: Iterable[str], pixelsize: float, radiometry: str, scale: str) -> None:
     """Run RTC processing on a single or multiple bursts.
 
     Args:
         granules: The burst granules to process.
         pixelsize: The pixel size to use.
         radiometry: The radiometry to use (gamma0, sigma0, or uncorrected).
+        scale: The scale to use (power, amplitude, or decibel).
     """
     burst_infos = get_burst_info(granules, INPUT_DIR)
     check_group_validity(burst_infos)
     dem_path = INPUT_DIR / 'dem.tiff'
     prep_data(burst_infos, INPUT_DIR, dem_path.name)
     orbit_paths = [Path(x) for x in INPUT_DIR.glob('*.EOF')]
-    mosaic_geogrid, cfgs = create_configs(burst_infos, orbit_paths, dem_path, pixelsize, radiometry)
+    full_geogrid, cfgs = create_configs(burst_infos, orbit_paths, dem_path, pixelsize, radiometry)
     for cfg in cfgs:
         load_parameters(cfg)
         run_single_job(cfg)
 
-    file_groups = create_file_list()
+    polarization = burst_infos[0].polarization.upper()
+    file_groups = create_file_list(polarization)
+    n_looks = file_groups['rtc_number_of_looks.tif']
     if len(granules) > 1:
         for name in file_groups:
-            mosaic_single_output_file(
-                file_groups[name],
-                file_groups['rtc_number_of_looks.tif'],
-                OUTPUT_DIR / name,
-                'first',
-                SCRATCH_DIR,
-                geogrid_in=mosaic_geogrid,
-            )
+            output_name = OUTPUT_DIR / name
+            files = file_groups[name]
+            mosaic_single_output_file(files, n_looks, output_name, 'first', SCRATCH_DIR, geogrid_in=full_geogrid)
     else:
         for name in file_groups:
             shutil.copy(file_groups[name][0], OUTPUT_DIR / name)
+
+    change_rtc_scale(OUTPUT_DIR / f'rtc_{polarization}.tif', scale)
 
 
 def main():
     """Entrypoint for burst_rtc command line usage."""
     parser = argparse.ArgumentParser(
-        prog='create_rtc',
+        prog='burst_rtc',
         description=__doc__,
     )
     parser.add_argument('granules', type=str.split, nargs='+')
     parser.add_argument('--pixelsize', type=float, choices=[10.0, 20.0, 30.0], default=30.0)
     parser.add_argument('--radiometry', choices=['gamma0', 'sigma0', 'uncorrected'], default='gamma0')
+    parser.add_argument('--scale', choices=['power', 'amplitude', 'decibel'], default='power')
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
 
     args = parser.parse_args()
     args.granules = [item for sublist in args.granules for item in sublist]
 
-    burst_rtc(args.granules, args.pixelsize, args.radiometry)
+    burst_rtc(args.granules, args.pixelsize, args.radiometry, args.scale)
 
 
 if __name__ == '__main__':
