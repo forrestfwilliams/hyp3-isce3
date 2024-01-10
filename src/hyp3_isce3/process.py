@@ -414,8 +414,15 @@ def burst_rtc(granules: Iterable[str], pixelsize: float, radiometry: str, scale:
         radiometry: The radiometry to use (gamma0, sigma0, or uncorrected).
         scale: The scale to use (power, amplitude, or decibel).
     """
+    if radiometry not in ('gamma0', 'sigma0', 'uncorrected'):
+        raise ValueError(f'Invalid radiometry {radiometry}. Must be gamma0, sigma0, or uncorrected.')
+
+    if scale not in ('power', 'amplitude', 'decibel'):
+        raise ValueError(f'Invalid scale {scale}. Must be power, amplitude, or decibel.')
+
     burst_infos = get_burst_info(granules, INPUT_DIR)
     check_group_validity(burst_infos)
+
     dem_path = INPUT_DIR / 'dem.tiff'
     prep_data(burst_infos, INPUT_DIR, dem_path.name)
     orbit_paths = [Path(x) for x in INPUT_DIR.glob('*.EOF')]
