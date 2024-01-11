@@ -235,7 +235,7 @@ def set_hyp3_defaults(cfg_dict: dict) -> dict:
 
 
 def set_important_options(
-    cfg_dict: dict, dem_path: str, orbit_paths: Iterable[str], pixel_size: float, radiometry: str
+    cfg_dict: dict, dem_path: str, orbit_paths: Iterable[str], pixel_size: float, radiometry: str, algorithm: str
 ) -> dict:
     """Set important options for RTC processing.
 
@@ -245,11 +245,23 @@ def set_important_options(
         orbit_paths: The paths to the orbit files to use.
         pixel_size: The pixel size to use.
         radiometry: The radiometry to use (gamma0, sigma0, or uncorrected).
+        algorithm: The geocoding and RTC algorithm to use (area_projection, or bilinear_distribution)
     Returns:
         The updated config dictionary.
     """
     cfg_dict['runconfig']['groups']['dynamic_ancillary_file_group']['dem_file'] = dem_path
     cfg_dict['runconfig']['groups']['input_file_group']['orbit_file_path'] = orbit_paths
+
+    cfg_dict['runconfig']['groups']['processing']['rtc']['algorithm_type'] = algorithm
+    if algorithm == 'bilinear_distribution':
+        cfg_dict['runconfig']['groups']['processing']['geocoding']['algorithm_type'] = algorithm.split('_')[0]
+    else:
+        cfg_dict['runconfig']['groups']['processing']['geocoding']['algorithm_type'] = algorithm
+
+    if radiometry == 'uncorrected':
+        cfg_dict['runconfig']['groups']['processing']['apply_rtc'] = False
+    else:
+        cfg_dict['runconfig']['groups']['processing']['rtc']['output_type'] = radiometry
 
     bursts_geogrid = cfg_dict['runconfig']['groups']['processing']['geocoding']['bursts_geogrid']
     mosaic_geogrid = cfg_dict['runconfig']['groups']['processing']['mosaicking']['mosaic_geogrid']
@@ -259,11 +271,6 @@ def set_important_options(
 
     cfg_dict['runconfig']['groups']['processing']['geocoding']['bursts_geogrid'] = bursts_geogrid
     cfg_dict['runconfig']['groups']['processing']['mosaicking']['mosaic_geogrid'] = mosaic_geogrid
-
-    if radiometry == 'uncorrected':
-        cfg_dict['runconfig']['groups']['processing']['apply_rtc'] = False
-    else:
-        cfg_dict['runconfig']['groups']['processing']['rtc']['output_type'] = radiometry
 
     return cfg_dict
 
@@ -296,7 +303,12 @@ def get_valid_orbit(burst_granule: str, orbit_paths: Iterable[Path]) -> Path:
 
 
 def create_configs(
-    burst_infos: Iterable[BurstInfo], orbit_paths: Iterable[Path], dem_path: Path, pixel_size: float, radiometry: str
+    burst_infos: Iterable[BurstInfo],
+    orbit_paths: Iterable[Path],
+    dem_path: Path,
+    pixel_size: float,
+    radiometry: str,
+    algorithm: str = 'area_projection',
 ) -> Tuple[GeoGridParameters, List[RunConfig]]:
     """Create RunConfig objects for each input burst.
 
@@ -306,6 +318,7 @@ def create_configs(
         dem_path: The path to the DEM to use.
         pixel_size: The pixel size to use.
         radiometry: The radiometry to use (gamma0, sigma0, or uncorrected).
+        algorithm: The geocoding and RTC algorithm to use (area_projection, or bilinear_distribution)
     Returns:
         The mosaic geogrid parameters for merging, and a list of RunConfig objects customized for each burst.
     """
@@ -316,7 +329,7 @@ def create_configs(
 
     cfg = set_hyp3_defaults(cfg)
     orbit_path_strs = [str(x) for x in orbit_paths]
-    set_important_options(cfg, str(dem_path), orbit_path_strs, pixel_size, radiometry)
+    set_important_options(cfg, str(dem_path), orbit_path_strs, pixel_size, radiometry, algorithm)
 
     groups_cfg = cfg['runconfig']['groups']
 
@@ -424,7 +437,7 @@ def burst_rtc(granules: Iterable[str], pixelsize: float, radiometry: str, scale:
     check_group_validity(burst_infos)
 
     dem_path = INPUT_DIR / 'dem.tiff'
-    prep_data(burst_infos, INPUT_DIR, dem_path.name)
+    # prep_data(burst_infos, INPUT_DIR, dem_path.name)
     orbit_paths = [Path(x) for x in INPUT_DIR.glob('*.EOF')]
     full_geogrid, cfgs = create_configs(burst_infos, orbit_paths, dem_path, pixelsize, radiometry)
     for cfg in cfgs:
