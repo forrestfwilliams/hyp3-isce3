@@ -418,7 +418,7 @@ def change_rtc_scale(file_path: Path, scale: str) -> None:
         raise ValueError(f'Invalid scale {scale}. Must be power, amplitude, or decibel.')
 
 
-def burst_rtc(granules: Iterable[str], pixelsize: float, radiometry: str, scale: str) -> None:
+def isce3_rtc(granules: Iterable[str], pixelsize: float, radiometry: str, scale: str) -> None:
     """Run RTC processing on a single or multiple bursts.
 
     Args:
@@ -437,7 +437,7 @@ def burst_rtc(granules: Iterable[str], pixelsize: float, radiometry: str, scale:
     check_group_validity(burst_infos)
 
     dem_path = INPUT_DIR / 'dem.tiff'
-    # prep_data(burst_infos, INPUT_DIR, dem_path.name)
+    prep_data(burst_infos, INPUT_DIR, dem_path.name)
     orbit_paths = [Path(x) for x in INPUT_DIR.glob('*.EOF')]
     full_geogrid, cfgs = create_configs(burst_infos, orbit_paths, dem_path, pixelsize, radiometry)
     for cfg in cfgs:
@@ -462,7 +462,7 @@ def burst_rtc(granules: Iterable[str], pixelsize: float, radiometry: str, scale:
 def main():
     """Entrypoint for burst_rtc command line usage."""
     parser = argparse.ArgumentParser(
-        prog='burst_rtc',
+        prog='isce3_rtc',
         description=__doc__,
     )
     parser.add_argument('granules', type=str.split, nargs='+')
@@ -474,7 +474,7 @@ def main():
     args = parser.parse_args()
     args.granules = [item for sublist in args.granules for item in sublist]
 
-    burst_rtc(args.granules, args.pixelsize, args.radiometry, args.scale)
+    isce3_rtc(args.granules, args.pixelsize, args.radiometry, args.scale)
 
 
 if __name__ == '__main__':

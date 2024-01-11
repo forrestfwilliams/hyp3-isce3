@@ -34,11 +34,11 @@ develop = [
 ]
 
 [project.urls]
-Homepage = "ttps://github.com/forrestfwilliams/hyp3-isce3"
+Homepage = "https://github.com/forrestfwilliams/hyp3-isce3"
 Documentation = "https://hyp3-docs.asf.alaska.edu"
 
 [project.scripts]
-burst_rtc = "hyp3_isce3.process:main"
+isce3_rtc = "hyp3_isce3.isce3_rtc:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
