@@ -4,12 +4,13 @@ ISCE3 burst-based RTC processing for single or multiple bursts.
 import argparse
 import copy
 import logging
+import os
 import shutil
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import asf_search
 import numpy as np
@@ -418,7 +419,37 @@ def change_rtc_scale(file_path: Path, scale: str) -> None:
         raise ValueError(f'Invalid scale {scale}. Must be power, amplitude, or decibel.')
 
 
-def isce3_rtc(granules: Iterable[str], pixelsize: float, radiometry: str, scale: str) -> None:
+def single_burst_rtc(cfg: RunConfig) -> None:
+    """Run RTC processing on a single burst.
+
+    Args:
+        cfg: The RTC RunConfig object to use.
+    """
+    load_parameters(cfg)
+    run_single_job(cfg)
+
+
+def get_n_proc(n_proc: Optional[int], n_bursts: int) -> int:
+    """Get the number of processes to use for RTC processing.
+
+    Args:
+        n_proc: The number of processes to use.
+        n_bursts: The number of bursts to process.
+    """
+    if n_proc is None:
+        n_proc = os.getenv('OMP_NUM_THREADS')
+        if n_proc is None:
+            n_proc = 1
+        else:
+            n_proc = int(n_proc)
+
+    n_proc = min(n_proc, n_bursts, int(os.cpu_count()) - 1)
+    return n_proc
+
+
+def isce3_rtc(
+    granules: Iterable[str], pixelsize: float, radiometry: str, scale: str, n_proc: Optional[int] = None
+) -> None:
     """Run RTC processing on a single or multiple bursts.
 
     Args:
@@ -440,9 +471,16 @@ def isce3_rtc(granules: Iterable[str], pixelsize: float, radiometry: str, scale:
     prep_data(burst_infos, INPUT_DIR, dem_path.name)
     orbit_paths = [Path(x) for x in INPUT_DIR.glob('*.EOF')]
     full_geogrid, cfgs = create_configs(burst_infos, orbit_paths, dem_path, pixelsize, radiometry)
+
     for cfg in cfgs:
-        load_parameters(cfg)
-        run_single_job(cfg)
+        single_burst_rtc(cfg)
+
+    # FIXME: this currently is not possible because isce3.ext.isce3.core.Poly1d is not picklable
+    # n_proc = get_n_proc(n_proc, len(burst_infos))
+    # with ProcessPoolExecutor(max_workers=n_proc) as executor:
+    #     futures = executor.map(single_burst_rtc, cfgs)
+    #     done, not_done = wait(futures)
+    # print('Child processes have completed.')
 
     polarization = burst_infos[0].polarization.upper()
     file_groups = create_file_list(polarization)
@@ -469,6 +507,7 @@ def main():
     parser.add_argument('--pixelsize', type=float, choices=[10.0, 20.0, 30.0], default=30.0)
     parser.add_argument('--radiometry', choices=['gamma0', 'sigma0', 'uncorrected'], default='gamma0')
     parser.add_argument('--scale', choices=['power', 'amplitude', 'decibel'], default='power')
+    parser.add_argument('--nproc', type=int, default=None)
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
 
     args = parser.parse_args()
